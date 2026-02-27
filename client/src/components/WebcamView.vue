@@ -1,169 +1,250 @@
 <script setup>
 import { ref, onMounted, onUnmounted, watch } from 'vue'
+import { Pose, POSE_CONNECTIONS } from '@mediapipe/pose'
+import { Camera } from '@mediapipe/camera_utils'
 
 const props = defineProps({
-  shirt: Object   // Selected shirt object: { id, name, color, hex }
+  shirt: Object
 })
 
-// Template refs — these give us direct access to the HTML elements
-const videoRef = ref(null)    // The hidden <video> element (webcam stream)
-const canvasRef = ref(null)   // The <canvas> we draw everything onto
+// Template refs — direct access to DOM elements
+const videoRef = ref(null)
+const canvasRef = ref(null)
 
-let stream = null             // Stores the webcam MediaStream
-let animationId = null        // Used to cancel the drawing loop
+// State
+const errorMsg = ref('')
+const isPoseReady = ref(false)   // true once MediaPipe detects a person
 
-// ─── STEP 1: Start the Webcam ────────────────────────────────────────────────
-// This asks the browser for camera permission and starts streaming
-async function startWebcam() {
-  try {
-    // getUserMedia is the browser API for accessing the camera
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: { width: 1280, height: 720, facingMode: 'user' }
-    })
-    videoRef.value.srcObject = stream
-    videoRef.value.play()
-    // Once video starts playing, begin the drawing loop
-    videoRef.value.addEventListener('playing', startDrawingLoop)
-  } catch (err) {
-    console.error('Camera access denied or unavailable:', err)
-    errorMsg.value = 'Camera access denied. Please allow camera access and refresh.'
-  }
+// These hold the latest shoulder positions MediaPipe detected
+// We store them outside the drawing loop so they persist between frames
+let lastLandmarks = null
+
+// MediaPipe and Camera instances
+let pose = null
+let camera = null
+
+// ─── STEP 1: Initialize MediaPipe Pose ───────────────────────────────────────
+// MediaPipe Pose is an AI model that runs entirely in the browser.
+// It takes a video frame and returns 33 "landmarks" (x,y coordinates
+// for parts of your body like shoulders, elbows, hips, nose, etc.)
+async function initPose() {
+  pose = new Pose({
+    locateFile: (file) => {
+      // MediaPipe needs to load its AI model files (.wasm, .tflite)
+      // This URL tells it where to find them (from a CDN — no download needed)
+      return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`
+    }
+  })
+
+  // These settings control the AI model's behavior
+  pose.setOptions({
+    modelComplexity: 1,         // 0=fastest, 1=balanced, 2=most accurate
+    smoothLandmarks: true,      // Smooths jittery movements between frames
+    enableSegmentation: false,  // We don't need background removal
+    minDetectionConfidence: 0.5, // How sure it needs to be to "find" a person
+    minTrackingConfidence: 0.5, // How sure it needs to be to keep tracking
+  })
+
+  // This callback fires every time MediaPipe finishes analyzing a frame
+  // It gives us the 33 landmark coordinates
+  pose.onResults(onPoseResults)
 }
 
-// ─── STEP 2: The Drawing Loop ─────────────────────────────────────────────────
-// requestAnimationFrame calls this ~60 times per second, creating smooth video
-function startDrawingLoop() {
+// ─── STEP 2: Handle Each Pose Result ─────────────────────────────────────────
+// This is called ~30 times per second by MediaPipe with new landmark data
+function onPoseResults(results) {
   const canvas = canvasRef.value
-  const video = videoRef.value
+  if (!canvas) return
   const ctx = canvas.getContext('2d')
 
-  // Match canvas size to video size
-  canvas.width = video.videoWidth
-  canvas.height = video.videoHeight
+  // Match canvas to video dimensions
+  canvas.width = results.image.width
+  canvas.height = results.image.height
 
-  function draw() {
-    // Draw the live webcam frame onto the canvas
-    // We flip it horizontally (mirror mode) — natural for selfie cameras
-    ctx.save()
-    ctx.translate(canvas.width, 0)
-    ctx.scale(-1, 1)
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
-    ctx.restore()
+  // Clear the previous frame
+  ctx.clearRect(0, 0, canvas.width, canvas.height)
 
-    // ─── STEP 3: Draw the Shirt Overlay ──────────────────────────────────────
-    // Right now: draw a colored rectangle as placeholder
-    // On Day 2: replace this with MediaPipe shoulder-detection coordinates
+  // Draw the webcam frame (mirrored, like a selfie camera)
+  ctx.save()
+  ctx.translate(canvas.width, 0)
+  ctx.scale(-1, 1)
+  ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height)
+  ctx.restore()
+
+  // results.poseLandmarks = array of 33 points, each with {x, y, z, visibility}
+  // x and y are normalized (0.0 to 1.0) — multiply by canvas size for pixel coords
+  if (results.poseLandmarks) {
+    lastLandmarks = results.poseLandmarks
+    isPoseReady.value = true
+
+    // Draw shoulder dots (helpful for debugging — shows what MediaPipe detects)
+    drawShoulderDebug(ctx, results.poseLandmarks, canvas.width, canvas.height)
+
+    // Draw the shirt on top of the webcam feed
     if (props.shirt) {
-      drawShirtPlaceholder(ctx, canvas.width, canvas.height, props.shirt)
+      drawShirtOnShoulders(ctx, results.poseLandmarks, canvas.width, canvas.height, props.shirt)
     }
-
-    // Request next frame (creates the animation loop)
-    animationId = requestAnimationFrame(draw)
+  } else {
+    // No person detected in this frame
+    isPoseReady.value = false
+    lastLandmarks = null
   }
-
-  draw()
 }
 
-// ─── Shirt Placeholder ───────────────────────────────────────────────────────
-// This simulates where the shirt will appear once we add pose detection.
-// The shirt is placed at ~40% from top, centered, at ~50% of canvas width.
-// On Day 2 we'll replace these fixed numbers with real shoulder coordinates.
-function drawShirtPlaceholder(ctx, canvasW, canvasH, shirt) {
-  const shirtW = canvasW * 0.5        // Shirt width = 50% of canvas
-  const shirtH = shirtW * 1.2         // Height proportional (portrait shirt shape)
-  const x = (canvasW - shirtW) / 2    // Centered horizontally
-  const y = canvasH * 0.32            // ~1/3 down the canvas (chest area)
+// ─── STEP 3: Shoulder Debug Dots ─────────────────────────────────────────────
+// Shows small circles where MediaPipe thinks your shoulders are.
+// This is just for development — we'll remove or toggle it later.
+function drawShoulderDebug(ctx, landmarks, w, h) {
+  // Index 11 = LEFT_SHOULDER, Index 12 = RIGHT_SHOULDER
+  // (MediaPipe's "left" is YOUR left, not the mirror's left)
+  // Because we mirror the canvas, left and right appear correctly
+  const leftShoulder  = landmarks[11]
+  const rightShoulder = landmarks[12]
 
-  // Draw filled rectangle as shirt shape
+  ;[leftShoulder, rightShoulder].forEach(pt => {
+    // Landmarks are 0–1 normalized. Multiply by canvas size for pixel position.
+    // Mirror the x coordinate to match our flipped canvas
+    const px = (1 - pt.x) * w
+    const py = pt.y * h
+
+    ctx.beginPath()
+    ctx.arc(px, py, 8, 0, Math.PI * 2)
+    ctx.fillStyle = 'rgba(168, 85, 247, 0.8)'   // Purple dot
+    ctx.fill()
+    ctx.strokeStyle = 'white'
+    ctx.lineWidth = 2
+    ctx.stroke()
+  })
+}
+
+// ─── STEP 4: Draw Shirt Using Real Shoulder Positions ────────────────────────
+// This is the core of the overlay logic.
+// We use the shoulder coordinates to position and scale the shirt correctly.
+function drawShirtOnShoulders(ctx, landmarks, w, h, shirt) {
+  const leftShoulder  = landmarks[11]   // MediaPipe landmark index 11
+  const rightShoulder = landmarks[12]   // MediaPipe landmark index 12
+
+  // Convert normalized 0–1 coordinates to actual pixel positions
+  // We mirror x because our canvas is flipped
+  const lx = (1 - leftShoulder.x)  * w
+  const ly = leftShoulder.y         * h
+  const rx = (1 - rightShoulder.x) * w
+  const ry = rightShoulder.y        * h
+
+  // Calculate the midpoint between the two shoulders (center of chest)
+  const midX = (lx + rx) / 2
+  const midY = (ly + ry) / 2
+
+  // Measure pixel distance between shoulders
+  const dx = rx - lx
+  const dy = ry - ly
+  const shoulderDist = Math.sqrt(dx * dx + dy * dy)
+
+  // Scale the shirt wider than the shoulders
+  // 1.8 means shirt is 80% wider — covers arms too
+  const shirtW = shoulderDist * 1.8
+  const shirtH = shirtW * 1.2   // Portrait shape (taller than wide)
+
+  // Position: center horizontally at midpoint, go up slightly from midpoint
+  const shirtX = midX - shirtW / 2
+  const shirtY = midY - shirtH * 0.12  // Shift up so collar sits at shoulders
+
+  // Draw the shirt shape
   ctx.save()
-  ctx.globalAlpha = 0.55              // Semi-transparent so you can see through
+  ctx.globalAlpha = 0.65
 
-  // Shirt body
+  // Main shirt body
   ctx.fillStyle = shirt.hex
   ctx.beginPath()
-  ctx.roundRect(x, y, shirtW, shirtH, [8, 8, 12, 12])
+  ctx.roundRect(shirtX, shirtY, shirtW, shirtH, [6, 6, 10, 10])
   ctx.fill()
 
-  // Neckline cutout (simple trapezoid shape)
+  // Neckline cutout (ellipse at top-center)
   ctx.globalCompositeOperation = 'destination-out'
   ctx.beginPath()
-  const neckW = shirtW * 0.2
-  ctx.ellipse(x + shirtW / 2, y + 4, neckW, shirtH * 0.1, 0, 0, Math.PI * 2)
+  ctx.ellipse(midX, shirtY + 5, shirtW * 0.1, shirtH * 0.09, 0, 0, Math.PI * 2)
   ctx.fill()
 
+  // Restore and add shirt border
   ctx.globalCompositeOperation = 'source-over'
-
-  // Collar outline
-  ctx.globalAlpha = 0.8
-  ctx.strokeStyle = 'rgba(255,255,255,0.3)'
+  ctx.globalAlpha = 0.9
+  ctx.strokeStyle = 'rgba(255,255,255,0.25)'
   ctx.lineWidth = 2
   ctx.beginPath()
-  ctx.roundRect(x, y, shirtW, shirtH, [8, 8, 12, 12])
+  ctx.roundRect(shirtX, shirtY, shirtW, shirtH, [6, 6, 10, 10])
   ctx.stroke()
 
   ctx.restore()
-
-  // Label (helpful during development)
-  ctx.save()
-  ctx.globalAlpha = 0.9
-  ctx.fillStyle = 'rgba(0,0,0,0.5)'
-  ctx.fillRect(x + shirtW/2 - 60, y + shirtH + 8, 120, 24)
-  ctx.fillStyle = 'white'
-  ctx.font = '12px Inter, sans-serif'
-  ctx.textAlign = 'center'
-  ctx.fillText('📍 Shirt position (placeholder)', x + shirtW/2, y + shirtH + 24)
-  ctx.restore()
 }
 
-// ─── Cleanup ─────────────────────────────────────────────────────────────────
-function stopWebcam() {
-  if (animationId) cancelAnimationFrame(animationId)
-  if (stream) stream.getTracks().forEach(track => track.stop())
+// ─── STEP 5: Start MediaPipe Camera ──────────────────────────────────────────
+// @mediapipe/camera_utils handles feeding video frames into MediaPipe.
+// It's smarter than using requestAnimationFrame directly because it
+// handles timing, skips frames if the model is busy, etc.
+function startCamera() {
+  camera = new Camera(videoRef.value, {
+    onFrame: async () => {
+      // Every frame from the webcam → send it to MediaPipe for analysis
+      await pose.send({ image: videoRef.value })
+    },
+    width: 1280,
+    height: 720
+  })
+  camera.start()
 }
 
-// Lifecycle hooks — Vue calls these automatically
-onMounted(() => startWebcam())
-onUnmounted(() => stopWebcam())
+// ─── Lifecycle ────────────────────────────────────────────────────────────────
+onMounted(async () => {
+  try {
+    await initPose()
+    startCamera()
+  } catch (err) {
+    console.error(err)
+    errorMsg.value = 'Failed to initialize pose detection. Check your internet connection.'
+  }
+})
 
-const errorMsg = ref('')
-const isPoseReady = ref(false)  // Will become true on Day 2 when MediaPipe loads
+onUnmounted(() => {
+  camera?.stop()
+  pose?.close()
+})
 </script>
 
 <template>
   <div class="webcam-wrapper">
     <!-- Status bar -->
     <div class="webcam-status-bar">
-      <div class="status-dot" :class="{ active: !errorMsg }"></div>
-      <span class="status-text">{{ errorMsg ? 'Camera Error' : 'Live Preview' }}</span>
+      <div class="status-dot" :class="{ active: isPoseReady }"></div>
+      <span class="status-text">{{ isPoseReady ? 'Pose Detected' : 'Looking for pose...' }}</span>
       <span class="badge" style="margin-left: auto;">
         {{ shirt ? `Shirt: ${shirt.name}` : 'No shirt selected' }}
       </span>
     </div>
 
-    <!-- Canvas: this is what the user sees — webcam + shirt overlay on top -->
+    <!-- Canvas container -->
     <div class="canvas-container">
-      <!-- Hidden video element — provides the raw camera stream to draw from -->
+      <!-- Hidden video: MediaPipe reads frames from here -->
       <video ref="videoRef" class="hidden-video" autoplay muted playsinline></video>
 
-      <!-- Visible canvas — we draw video frames + shirt overlay here -->
+      <!-- Visible canvas: webcam + shirt overlay drawn here -->
       <canvas ref="canvasRef" class="main-canvas"></canvas>
 
       <!-- Error overlay -->
-      <div v-if="errorMsg" class="error-overlay">
+      <div v-if="errorMsg" class="overlay-message">
         <span>📷</span>
         <p>{{ errorMsg }}</p>
       </div>
 
-      <!-- The "no shirt" hint -->
-      <div v-if="!shirt && !errorMsg" class="no-shirt-hint">
-        <span>👕</span>
-        <p>Select a shirt from the left panel to see the overlay</p>
+      <!-- Loading state while MediaPipe initializes -->
+      <div v-if="!isPoseReady && !errorMsg" class="overlay-message loading">
+        <div class="loading-spinner"></div>
+        <p>Loading AI Pose Detection...<br><small>First load may take a few seconds</small></p>
       </div>
 
-      <!-- Day 2 badge — will be replaced with real MediaPipe status -->
-      <div class="pose-badge">
-        <span class="pose-dot placeholder"></span>
-        Pose Detection: Coming Day 2
+      <!-- Pose status badge (bottom left corner) -->
+      <div class="pose-badge" :class="{ active: isPoseReady }">
+        <span class="pose-dot" :class="{ active: isPoseReady, placeholder: !isPoseReady }"></span>
+        {{ isPoseReady ? 'Pose Active ✓' : 'Pose Loading...' }}
       </div>
     </div>
 
@@ -201,6 +282,7 @@ const isPoseReady = ref(false)  // Will become true on Day 2 when MediaPipe load
   border-radius: 50%;
   background: var(--text-muted);
   flex-shrink: 0;
+  transition: var(--transition);
 }
 
 .status-dot.active {
@@ -225,7 +307,6 @@ const isPoseReady = ref(false)  // Will become true on Day 2 when MediaPipe load
   border-top: none;
 }
 
-/* The video element is hidden — we only use it as a source for the canvas */
 .hidden-video {
   display: none;
 }
@@ -234,35 +315,53 @@ const isPoseReady = ref(false)  // Will become true on Day 2 when MediaPipe load
   width: 100%;
   height: 100%;
   display: block;
-  object-fit: cover;
 }
 
-.error-overlay,
-.no-shirt-hint {
+/* Overlay for error or loading states */
+.overlay-message {
   position: absolute;
   inset: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 0.75rem;
-  background: rgba(0,0,0,0.7);
+  gap: 1rem;
+  background: rgba(0, 0, 0, 0.75);
   font-size: 2rem;
+  backdrop-filter: blur(4px);
 }
 
-.no-shirt-hint {
-  background: rgba(0,0,0,0.4);
+.overlay-message.loading {
+  background: rgba(0, 0, 0, 0.6);
 }
 
-.no-shirt-hint p,
-.error-overlay p {
-  font-size: 0.85rem;
+.overlay-message p {
+  font-size: 0.88rem;
   color: var(--text-secondary);
-  max-width: 260px;
   text-align: center;
-  line-height: 1.5;
+  line-height: 1.6;
 }
 
+.overlay-message small {
+  font-size: 0.76rem;
+  color: var(--text-muted);
+}
+
+/* Loading spinner */
+.loading-spinner {
+  width: 36px;
+  height: 36px;
+  border: 3px solid rgba(168, 85, 247, 0.2);
+  border-top-color: var(--accent-primary);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Pose status badge in corner */
 .pose-badge {
   position: absolute;
   bottom: 12px;
@@ -271,18 +370,25 @@ const isPoseReady = ref(false)  // Will become true on Day 2 when MediaPipe load
   align-items: center;
   gap: 0.4rem;
   padding: 0.3rem 0.65rem;
-  background: rgba(0,0,0,0.6);
+  background: rgba(0, 0, 0, 0.65);
   border-radius: 999px;
   font-size: 0.72rem;
   color: var(--text-secondary);
   backdrop-filter: blur(4px);
   border: 1px solid var(--border);
+  transition: var(--transition);
+}
+
+.pose-badge.active {
+  border-color: rgba(34, 197, 94, 0.4);
+  color: #22c55e;
 }
 
 .pose-dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
+  transition: var(--transition);
 }
 
 .pose-dot.placeholder {
@@ -293,6 +399,7 @@ const isPoseReady = ref(false)  // Will become true on Day 2 when MediaPipe load
 .pose-dot.active {
   background: #22c55e;
   box-shadow: 0 0 6px #22c55e88;
+  animation: pulse 2s infinite;
 }
 
 .webcam-instructions {
