@@ -8,13 +8,13 @@ const emit = defineEmits(['shirt-selected'])
 
 // Our shirt options — in a real app these URLs would come from AWS S3
 // For now we use placeholder colors; we'll swap with real S3 URLs on Day 4
+const s3BaseUrl = 'https://virtual-styling-shirts-prasanna.s3.us-east-2.amazonaws.com'
+
 const shirts = [
-  { id: 1, name: 'Classic White', color: 'white', hex: '#f0f0f0', emoji: '⬜' },
-  { id: 2, name: 'Ocean Blue',   color: 'blue',   hex: '#2563eb', emoji: '🟦' },
-  { id: 3, name: 'Midnight Black', color: 'black', hex: '#1a1a1a', emoji: '⬛' },
-  { id: 4, name: 'Coral Pink',   color: 'pink',   hex: '#ec4899', emoji: '🟥' },
-  { id: 5, name: 'Forest Green', color: 'green',  hex: '#16a34a', emoji: '🟩' },
-  { id: 6, name: 'Royal Purple', color: 'purple', hex: '#7c3aed', emoji: '🟪' },
+  { id: 1, name: 'Classic White', color: 'white', imageUrl: `${s3BaseUrl}/white-tshirt.png` },
+  { id: 2, name: 'Ruby Red',      color: 'red',   imageUrl: `${s3BaseUrl}/red-tshirt.png` },
+  { id: 3, name: 'Ocean Blue',    color: 'blue',  imageUrl: `${s3BaseUrl}/blue-tshirt.png` },
+  { id: 4, name: 'Cool Grey',     color: 'grey',  imageUrl: `${s3BaseUrl}/grey-tshirt.png` },
 ]
 
 function selectShirt(shirt) {
@@ -35,11 +35,11 @@ function selectShirt(shirt) {
         @click="selectShirt(shirt)"
         :title="shirt.name"
       >
-        <!-- Color preview circle -->
-        <span
-          class="color-circle"
-          :style="{ background: shirt.hex, boxShadow: props.shirt?.id === shirt.id ? `0 0 12px ${shirt.hex}88` : 'none' }"
-        ></span>
+        <!-- Real image thumbnail -->
+        <div class="thumbnail-wrapper" :class="{ 'is-selected': props.shirt?.id === shirt.id }">
+          <img :src="shirt.imageUrl" :alt="shirt.name" class="shirt-thumbnail" />
+        </div>
+        
         <span class="shirt-name">{{ shirt.name }}</span>
 
         <!-- Checkmark when selected -->
@@ -95,13 +95,31 @@ function selectShirt(shirt) {
   color: var(--text-primary);
 }
 
-.color-circle {
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
+.thumbnail-wrapper {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
   flex-shrink: 0;
-  border: 2px solid rgba(255,255,255,0.15);
   transition: var(--transition);
+}
+
+.thumbnail-wrapper.is-selected {
+  border-color: var(--accent-primary);
+  background: rgba(168, 85, 247, 0.1);
+}
+
+.shirt-thumbnail {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  /* Add a tiny drop shadow to make the transparent png pop */
+  filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5));
 }
 
 .shirt-name {

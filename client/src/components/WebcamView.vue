@@ -117,6 +117,20 @@ function drawShoulderDebug(ctx, landmarks, w, h) {
   })
 }
 
+// Cache to store pre-loaded Image objects so we don't recreate them every frame
+const imageCache = {}
+
+function getOrLoadImage(url) {
+  if (imageCache[url]) return imageCache[url]
+  
+  // Create and cache the image immediately so we don't spam requests
+  const img = new Image()
+  img.crossOrigin = 'anonymous' // Important for loading S3 images into Canvas
+  img.src = url
+  imageCache[url] = img
+  return img
+}
+
 // ─── STEP 4: Draw Shirt Using Real Shoulder Positions ────────────────────────
 // This is the core of the overlay logic.
 // We use the shoulder coordinates to position and scale the shirt correctly.
@@ -142,37 +156,31 @@ function drawShirtOnShoulders(ctx, landmarks, w, h, shirt) {
 
   // Scale the shirt wider than the shoulders
   // 1.8 means shirt is 80% wider — covers arms too
-  const shirtW = shoulderDist * 1.8
-  const shirtH = shirtW * 1.2   // Portrait shape (taller than wide)
+  const shirtW = shoulderDist * 2.2
+  // For Real PNGs, maintaining aspect ratio is crucial. Most tshirts are roughly 1:1.1 aspect.
+  // We will draw it with a fixed ratio here, but ideally we'd use the loaded image's natural ratio.
+  const img = getOrLoadImage(shirt.imageUrl)
+  
+  // If the image is fully loaded, use its actual aspect ratio
+  const ratio = img.complete && img.naturalWidth > 0 
+    ? (img.naturalHeight / img.naturalWidth) 
+    : 1.1
+
+  const shirtH = shirtW * ratio
 
   // Position: center horizontally at midpoint, go up slightly from midpoint
+  // The exact Y offset depends on how the PNG is cropped. About 15% up usually looks right for a tight crop.
   const shirtX = midX - shirtW / 2
-  const shirtY = midY - shirtH * 0.12  // Shift up so collar sits at shoulders
+  const shirtY = midY - shirtH * 0.15
 
-  // Draw the shirt shape
+  // Draw the real shirt image
   ctx.save()
-  ctx.globalAlpha = 0.65
-
-  // Main shirt body
-  ctx.fillStyle = shirt.hex
-  ctx.beginPath()
-  ctx.roundRect(shirtX, shirtY, shirtW, shirtH, [6, 6, 10, 10])
-  ctx.fill()
-
-  // Neckline cutout (ellipse at top-center)
-  ctx.globalCompositeOperation = 'destination-out'
-  ctx.beginPath()
-  ctx.ellipse(midX, shirtY + 5, shirtW * 0.1, shirtH * 0.09, 0, 0, Math.PI * 2)
-  ctx.fill()
-
-  // Restore and add shirt border
-  ctx.globalCompositeOperation = 'source-over'
-  ctx.globalAlpha = 0.9
-  ctx.strokeStyle = 'rgba(255,255,255,0.25)'
-  ctx.lineWidth = 2
-  ctx.beginPath()
-  ctx.roundRect(shirtX, shirtY, shirtW, shirtH, [6, 6, 10, 10])
-  ctx.stroke()
+  // Add a tiny bit of opacity just so it blends smoothly with the camera feed
+  ctx.globalAlpha = 0.95
+  
+  if (img.complete && img.naturalWidth > 0) {
+    ctx.drawImage(img, shirtX, shirtY, shirtW, shirtH)
+  }
 
   ctx.restore()
 }
