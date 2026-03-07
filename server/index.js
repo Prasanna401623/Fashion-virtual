@@ -1,11 +1,15 @@
 const express = require('express');
 const cors = require('cors');
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
+
+// ─── Serve DuckHunt game files ───
+app.use('/duckhunt', express.static(path.join(__dirname, 'public', 'duckhunt')));
 
 // ─── In-memory leaderboard ───
 let leaderboard = [];
@@ -33,7 +37,7 @@ app.post('/api/leaderboard', (req, res) => {
 
   const entry = {
     id: Date.now().toString(),
-    name: name.slice(0, 20), // Max 20 chars
+    name: name.slice(0, 20),
     score,
     hits: hits || 0,
     misses: misses || 0,
@@ -51,4 +55,5 @@ app.post('/api/leaderboard', (req, res) => {
 // Start the server
 app.listen(PORT, () => {
   console.log(`✅ GunHand server running on http://localhost:${PORT}`);
+  console.log(`🦆 DuckHunt available at http://localhost:${PORT}/duckhunt/`);
 });
