@@ -1,244 +1,80 @@
 <script setup>
-import { ref, reactive, onUnmounted } from 'vue'
-import GameCanvas from './components/GameCanvas.vue'
+import { ref, onMounted, onUnmounted, watch } from 'vue'
 import HandTracker from './components/HandTracker.vue'
-import ScoreBoard from './components/ScoreBoard.vue'
-import GameOverScreen from './components/GameOverScreen.vue'
-import { Howl } from 'howler'
 
-// ─── Sound System (synthesized web audio) ───
-const sounds = {
-  shoot: new Howl({
-    src: ['data:audio/wav;base64,UklGRl9vT19teleXkZGRkQBQAAAEAAIAESsAACJWAAACABAAUklGRg=='],
-    volume: 0.3,
-    onloaderror: () => {} // Fallback: silent
-  }),
-  hit: new Howl({
-    src: ['data:audio/wav;base64,UklGRl9vT19teleXkZGRkQBQAAAEAAIAESsAACJWAAACABAAUklGRg=='],
-    volume: 0.4,
-    onloaderror: () => {}
-  }),
-  miss: new Howl({
-    src: ['data:audio/wav;base64,UklGRl9vT19teleXkZGRkQBQAAAEAAIAESsAACJWAAACABAAUklGRg=='],
-    volume: 0.2,
-    onloaderror: () => {}
-  })
-}
-
-// Use Web Audio API for actual sound synthesis
-const audioCtx = new (window.AudioContext || window.webkitAudioContext)()
-
-function playShootSound() {
-  const osc = audioCtx.createOscillator()
-  const gain = audioCtx.createGain()
-  osc.connect(gain)
-  gain.connect(audioCtx.destination)
-  osc.frequency.setValueAtTime(800, audioCtx.currentTime)
-  osc.frequency.exponentialRampToValueAtTime(150, audioCtx.currentTime + 0.15)
-  gain.gain.setValueAtTime(0.3, audioCtx.currentTime)
-  gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.15)
-  osc.start()
-  osc.stop(audioCtx.currentTime + 0.15)
-}
-
-function playHitSound() {
-  const osc = audioCtx.createOscillator()
-  const gain = audioCtx.createGain()
-  osc.connect(gain)
-  gain.connect(audioCtx.destination)
-  osc.type = 'sine'
-  osc.frequency.setValueAtTime(880, audioCtx.currentTime)
-  osc.frequency.exponentialRampToValueAtTime(1760, audioCtx.currentTime + 0.1)
-  gain.gain.setValueAtTime(0.25, audioCtx.currentTime)
-  gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.2)
-  osc.start()
-  osc.stop(audioCtx.currentTime + 0.2)
-}
-
-function playMissSound() {
-  const osc = audioCtx.createOscillator()
-  const gain = audioCtx.createGain()
-  osc.connect(gain)
-  gain.connect(audioCtx.destination)
-  osc.type = 'sawtooth'
-  osc.frequency.setValueAtTime(200, audioCtx.currentTime)
-  osc.frequency.exponentialRampToValueAtTime(80, audioCtx.currentTime + 0.3)
-  gain.gain.setValueAtTime(0.15, audioCtx.currentTime)
-  gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.3)
-  osc.start()
-  osc.stop(audioCtx.currentTime + 0.3)
-}
-
-// ─── Game State ───
-const gameState = ref('idle')    // 'idle' | 'playing' | 'round-end' | 'game-over'
-const score = ref(0)
-const combo = ref(0)
-const bestCombo = ref(0)
-const hits = ref(0)
-const misses = ref(0)
-const timeLeft = ref(30)
-const round = ref(1)
-const totalRounds = 3
+// ─── State ───
+const iframeRef = ref(null)
 const handPosition = ref(null)
-const targets = ref([])
-const shotFired = ref(0)
-const lastHit = ref(null)
+const gesture = ref('')
 const trackerReady = ref(false)
+const gameLoaded = ref(false)
+const showInstructions = ref(true)
 
-// Timer & target spawner
-let timerInterval = null
-let spawnInterval = null
-let targetIdCounter = 0
+// Smoothed cursor position
+let smoothX = 0.5
+let smoothY = 0.5
 
-// ─── Difficulty Config (per round) ───
-const ROUND_CONFIG = [
-  { spawnRate: 1500, targetLifetime: 3000, maxRadius: 45, maxTargets: 3 },  // Round 1: Easy
-  { spawnRate: 1200, targetLifetime: 2500, maxRadius: 38, maxTargets: 4 },  // Round 2: Medium
-  { spawnRate: 900,  targetLifetime: 2000, maxRadius: 30, maxTargets: 5 },  // Round 3: Hard
-]
+// Track previous gesture for transition detection
+let previousGesture = ''
 
-function getRoundConfig() {
-  return ROUND_CONFIG[Math.min(round.value - 1, ROUND_CONFIG.length - 1)]
-}
+// Crosshair cursor element
+const cursorX = ref(50)
+const cursorY = ref(50)
 
-// ─── Target Spawning ───
-function spawnTarget() {
-  const config = getRoundConfig()
-  if (targets.value.filter(t => !t.hit).length >= config.maxTargets) return
+// ─── Dispatch synthetic mouse events into the DuckHunt iframe ───
+function dispatchClickToIframe(x, y) {
+  try {
+    const iframe = iframeRef.value
+    if (!iframe || !iframe.contentWindow || !iframe.contentDocument) return
 
-  // Random position with margins (10%-90% range)
-  const margin = 0.1
-  const x = margin + Math.random() * (1 - 2 * margin)
-  const y = margin + Math.random() * (1 - 2 * margin)
+    const iframeDoc = iframe.contentDocument
+    const canvas = iframeDoc.querySelector('canvas')
+    if (!canvas) return
 
-  targets.value.push({
-    id: targetIdCounter++,
-    x,
-    y,
-    maxRadius: config.maxRadius * (0.7 + Math.random() * 0.3),
-    spawnTime: Date.now(),
-    lifetime: config.targetLifetime,
-    hit: false
-  })
-}
+    // Convert normalized 0-1 coords to iframe pixel coords
+    const rect = canvas.getBoundingClientRect()
+    const pixelX = x * rect.width
+    const pixelY = y * rect.height
 
-function cleanExpiredTargets() {
-  const now = Date.now()
-  targets.value = targets.value.filter(t => {
-    if (t.hit) return false
-    return (now - t.spawnTime) < t.lifetime
-  })
-}
+    // Dispatch mousedown + mouseup (PixiJS listens for mousedown)
+    const mouseDownEvent = new MouseEvent('mousedown', {
+      clientX: pixelX,
+      clientY: pixelY,
+      bubbles: true,
+      cancelable: true
+    })
 
-// ─── Game Controls ───
-function startGame() {
-  // Resume audio context (browsers require user gesture)
-  if (audioCtx.state === 'suspended') audioCtx.resume()
+    const mouseUpEvent = new MouseEvent('mouseup', {
+      clientX: pixelX,
+      clientY: pixelY,
+      bubbles: true,
+      cancelable: true
+    })
 
-  score.value = 0
-  combo.value = 0
-  bestCombo.value = 0
-  hits.value = 0
-  misses.value = 0
-  round.value = 1
-  timeLeft.value = 30
-  targets.value = []
-  lastHit.value = null
-  gameState.value = 'playing'
-
-  startRound()
-}
-
-function startRound() {
-  timeLeft.value = 30
-  targets.value = []
-  const config = getRoundConfig()
-
-  // Timer countdown
-  timerInterval = setInterval(() => {
-    timeLeft.value--
-    cleanExpiredTargets()
-
-    if (timeLeft.value <= 0) {
-      endRound()
-    }
-  }, 1000)
-
-  // Target spawner
-  spawnInterval = setInterval(spawnTarget, config.spawnRate)
-  // Spawn first target immediately
-  spawnTarget()
-}
-
-function endRound() {
-  clearInterval(timerInterval)
-  clearInterval(spawnInterval)
-  targets.value = []
-
-  if (round.value >= totalRounds) {
-    gameState.value = 'game-over'
-  } else {
-    gameState.value = 'round-end'
-    setTimeout(() => {
-      round.value++
-      gameState.value = 'playing'
-      startRound()
-    }, 2500)
+    canvas.dispatchEvent(mouseDownEvent)
+    setTimeout(() => canvas.dispatchEvent(mouseUpEvent), 50)
+  } catch (err) {
+    console.error('[GunHand] Error dispatching click to iframe:', err)
   }
 }
 
-// ─── Event Handlers from HandTracker ───
+// ─── Hand Tracker Events ───
 function onHandMove(pos) {
   handPosition.value = pos
+
+  // Smooth the cursor (lerp)
+  smoothX += (pos.x - smoothX) * 0.2
+  smoothY += (pos.y - smoothY) * 0.2
+
+  cursorX.value = smoothX * 100
+  cursorY.value = smoothY * 100
 }
 
 function onShoot() {
-  if (gameState.value !== 'playing') return
+  if (!gameLoaded.value) return
 
-  shotFired.value++
-  playShootSound()
-
-  // Check if crosshair is on any target
-  const cx = handPosition.value?.x ?? 0
-  const cy = handPosition.value?.y ?? 0
-
-  let hitTarget = null
-  for (const target of targets.value) {
-    if (target.hit) continue
-
-    const dx = cx - target.x
-    const dy = cy - target.y
-    // Calculate effective radius (targets are smaller in the game canvas, normalize)
-    const hitRadius = (target.maxRadius / 800) * 1.2  // Approximate hit area
-    const dist = Math.sqrt(dx * dx + dy * dy)
-
-    if (dist < hitRadius) {
-      hitTarget = target
-      break
-    }
-  }
-
-  if (hitTarget) {
-    // HIT!
-    hitTarget.hit = true
-    combo.value++
-    if (combo.value > bestCombo.value) bestCombo.value = combo.value
-    hits.value++
-
-    // Score: base 10 * combo, bonus for small targets
-    const sizeBonus = hitTarget.maxRadius < 35 ? 5 : 0
-    const points = (10 + sizeBonus) * combo.value
-    score.value += points
-
-    lastHit.value = { x: hitTarget.x, y: hitTarget.y, points }
-    playHitSound()
-  } else {
-    // MISS
-    combo.value = 0
-    misses.value++
-    lastHit.value = null
-    playMissSound()
-  }
+  // Use smoothed position for the shot
+  dispatchClickToIframe(smoothX, smoothY)
 }
 
 function onHandLost() {
@@ -249,16 +85,19 @@ function onTrackerReady() {
   trackerReady.value = true
 }
 
-function restartGame() {
-  clearInterval(timerInterval)
-  clearInterval(spawnInterval)
-  startGame()
+// ─── iframe load handler ───
+function onIframeLoad() {
+  gameLoaded.value = true
+  // Auto-hide instructions after 8 seconds
+  setTimeout(() => {
+    showInstructions.value = false
+  }, 8000)
 }
 
-onUnmounted(() => {
-  clearInterval(timerInterval)
-  clearInterval(spawnInterval)
-})
+// Dismiss instructions on click
+function dismissInstructions() {
+  showInstructions.value = false
+}
 </script>
 
 <template>
@@ -270,57 +109,90 @@ onUnmounted(() => {
           <span class="logo-icon">🔫</span>
           <div>
             <h1 class="app-title font-display">GUNHAND</h1>
-            <p class="app-subtitle">Gesture-Controlled Shooting Range</p>
+            <p class="app-subtitle">Gesture-Controlled Duck Hunt</p>
           </div>
         </div>
 
-        <!-- Start Button (only in idle state) -->
-        <button
-          v-if="gameState === 'idle' && trackerReady"
-          class="start-btn font-display"
-          @click="startGame"
-        >
-          🎯 START GAME
-        </button>
-
-        <!-- Scoreboard (during game) -->
-        <ScoreBoard
-          v-if="gameState === 'playing' || gameState === 'round-end'"
-          :score="score"
-          :combo="combo"
-          :timeLeft="timeLeft"
-          :round="round"
-          :totalRounds="totalRounds"
-          :hits="hits"
-          :misses="misses"
-        />
+        <!-- Status indicators -->
+        <div class="status-bar">
+          <div class="status-chip" :class="{ active: trackerReady }">
+            <span class="status-dot"></span>
+            {{ trackerReady ? 'Camera Ready' : 'Starting Camera...' }}
+          </div>
+          <div class="status-chip" :class="{ active: gameLoaded }">
+            <span class="status-dot"></span>
+            {{ gameLoaded ? 'Game Loaded' : 'Loading Game...' }}
+          </div>
+          <div class="status-chip gesture-chip" :class="{
+            aiming: handPosition && gesture !== 'Closed_Fist',
+            shooting: gesture === 'Closed_Fist'
+          }">
+            <span class="status-dot"></span>
+            {{ gesture === 'Closed_Fist' ? '🔫 FIRE!' : handPosition ? '🎯 Aiming' : '✋ Show Hand' }}
+          </div>
+        </div>
       </div>
     </header>
 
     <!-- Game Area -->
     <main class="game-area">
-      <div class="game-container">
-        <GameCanvas
-          :handPosition="handPosition"
-          :targets="targets"
-          :score="score"
-          :combo="combo"
-          :timeLeft="timeLeft"
-          :round="round"
-          :gameState="gameState"
-          :shotFired="shotFired"
-          :lastHit="lastHit"
-        />
+      <!-- DuckHunt iframe -->
+      <div class="game-frame">
+        <iframe
+          ref="iframeRef"
+          src="/duckhunt/"
+          class="game-iframe"
+          @load="onIframeLoad"
+          allow="autoplay"
+        ></iframe>
 
-        <!-- Game Over Overlay -->
-        <GameOverScreen
-          v-if="gameState === 'game-over'"
-          :finalScore="score"
-          :hits="hits"
-          :misses="misses"
-          :bestCombo="bestCombo"
-          @restart="restartGame"
-        />
+        <!-- Custom crosshair overlay -->
+        <div
+          v-if="handPosition && gameLoaded"
+          class="crosshair-overlay"
+          :style="{
+            left: cursorX + '%',
+            top: cursorY + '%'
+          }"
+        >
+          <div class="crosshair">
+            <div class="crosshair-line h"></div>
+            <div class="crosshair-line v"></div>
+            <div class="crosshair-dot"></div>
+            <div class="crosshair-ring"></div>
+          </div>
+        </div>
+
+        <!-- Instructions overlay -->
+        <div v-if="showInstructions && gameLoaded" class="instructions-overlay" @click="dismissInstructions">
+          <div class="instructions-card glass-panel">
+            <h2 class="font-display" style="color: var(--neon-green); font-size: 1.2rem;">HOW TO PLAY</h2>
+            <div class="instruction-steps">
+              <div class="step">
+                <span class="step-icon">✋</span>
+                <div>
+                  <strong>Open Palm</strong>
+                  <p>Move your hand to aim the crosshair</p>
+                </div>
+              </div>
+              <div class="step">
+                <span class="step-icon">✊</span>
+                <div>
+                  <strong>Close Fist</strong>
+                  <p>Shoot at the ducks!</p>
+                </div>
+              </div>
+              <div class="step">
+                <span class="step-icon">🦆</span>
+                <div>
+                  <strong>Hit the Ducks</strong>
+                  <p>Score points before they fly away</p>
+                </div>
+              </div>
+            </div>
+            <p class="dismiss-hint">Click anywhere to dismiss</p>
+          </div>
+        </div>
       </div>
 
       <!-- Hand Tracker PiP -->
@@ -346,14 +218,14 @@ onUnmounted(() => {
 .header {
   background: var(--bg-card);
   border-bottom: 1px solid var(--border);
-  padding: 10px 24px;
+  padding: 8px 24px;
   position: relative;
   z-index: 100;
   backdrop-filter: blur(10px);
 }
 
 .header-content {
-  max-width: 1400px;
+  max-width: 1600px;
   margin: 0 auto;
   display: flex;
   align-items: center;
@@ -367,11 +239,11 @@ onUnmounted(() => {
 }
 
 .logo-icon {
-  font-size: 1.8rem;
+  font-size: 1.6rem;
 }
 
 .app-title {
-  font-size: 1.3rem;
+  font-size: 1.2rem;
   font-weight: 900;
   letter-spacing: 0.1em;
   background: linear-gradient(135deg, var(--neon-green), var(--neon-blue));
@@ -382,64 +254,234 @@ onUnmounted(() => {
 }
 
 .app-subtitle {
-  font-size: 0.68rem;
+  font-size: 0.65rem;
   color: var(--text-muted);
   margin: 0;
   letter-spacing: 0.05em;
 }
 
-.start-btn {
+/* ── Status Bar ── */
+.status-bar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.status-chip {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 12px 28px;
-  background: linear-gradient(135deg, rgba(57, 255, 20, 0.15), rgba(0, 212, 255, 0.15));
-  border: 1px solid rgba(57, 255, 20, 0.3);
-  border-radius: var(--radius-md);
-  color: var(--neon-green);
-  font-size: 0.85rem;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  cursor: pointer;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  font-family: 'Orbitron', monospace;
+  letter-spacing: 0.03em;
   transition: var(--transition);
 }
 
-.start-btn:hover {
-  background: linear-gradient(135deg, rgba(57, 255, 20, 0.25), rgba(0, 212, 255, 0.25));
-  border-color: rgba(57, 255, 20, 0.5);
-  box-shadow: var(--glow-green);
-  transform: translateY(-2px);
+.status-chip.active {
+  color: var(--neon-green);
+  border-color: rgba(57, 255, 20, 0.2);
 }
 
-.start-btn:active {
-  transform: translateY(0);
+.status-chip.aiming {
+  color: var(--neon-green);
+  border-color: rgba(57, 255, 20, 0.3);
 }
 
+.status-chip.shooting {
+  color: var(--neon-red);
+  border-color: rgba(255, 59, 59, 0.3);
+  background: rgba(255, 59, 59, 0.08);
+}
+
+.status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: var(--transition);
+}
+
+.status-chip.active .status-dot {
+  background: var(--neon-green);
+  box-shadow: 0 0 6px var(--neon-green);
+}
+
+.status-chip.aiming .status-dot {
+  background: var(--neon-green);
+  box-shadow: 0 0 6px var(--neon-green);
+  animation: pulse-glow 1.5s infinite;
+}
+
+.status-chip.shooting .status-dot {
+  background: var(--neon-red);
+  box-shadow: 0 0 8px var(--neon-red);
+}
+
+/* ── Game Area ── */
 .game-area {
   flex: 1;
   display: flex;
-  align-items: stretch;
-  padding: 16px 24px;
   overflow: hidden;
 }
 
-.game-container {
+.game-frame {
   flex: 1;
   position: relative;
-  border-radius: var(--radius-lg);
   overflow: hidden;
+}
+
+.game-iframe {
+  width: 100%;
+  height: 100%;
+  border: none;
+  display: block;
+}
+
+/* ── Crosshair Overlay ── */
+.crosshair-overlay {
+  position: absolute;
+  pointer-events: none;
+  z-index: 50;
+  transform: translate(-50%, -50%);
+  transition: left 0.05s ease-out, top 0.05s ease-out;
+}
+
+.crosshair {
+  position: relative;
+  width: 40px;
+  height: 40px;
+}
+
+.crosshair-line {
+  position: absolute;
+  background: rgba(57, 255, 20, 0.9);
+  box-shadow: 0 0 6px rgba(57, 255, 20, 0.6);
+}
+
+.crosshair-line.h {
+  width: 100%;
+  height: 2px;
+  top: 50%;
+  left: 0;
+  transform: translateY(-50%);
+  /* Gap in center */
+  background: transparent;
+  background-image: linear-gradient(to right,
+    rgba(57, 255, 20, 0.9) 0%, rgba(57, 255, 20, 0.9) 35%,
+    transparent 35%, transparent 65%,
+    rgba(57, 255, 20, 0.9) 65%, rgba(57, 255, 20, 0.9) 100%
+  );
+}
+
+.crosshair-line.v {
+  height: 100%;
+  width: 2px;
+  left: 50%;
+  top: 0;
+  transform: translateX(-50%);
+  background: transparent;
+  background-image: linear-gradient(to bottom,
+    rgba(57, 255, 20, 0.9) 0%, rgba(57, 255, 20, 0.9) 35%,
+    transparent 35%, transparent 65%,
+    rgba(57, 255, 20, 0.9) 65%, rgba(57, 255, 20, 0.9) 100%
+  );
+}
+
+.crosshair-dot {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 4px;
+  height: 4px;
+  background: var(--neon-green);
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 8px var(--neon-green);
+}
+
+.crosshair-ring {
+  position: absolute;
+  inset: -2px;
+  border: 1px solid rgba(57, 255, 20, 0.3);
+  border-radius: 50%;
+}
+
+/* ── Instructions Overlay ── */
+.instructions-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(10, 14, 23, 0.7);
+  backdrop-filter: blur(4px);
+  z-index: 60;
+  cursor: pointer;
+  animation: slide-in-up 0.4s ease;
+}
+
+.instructions-card {
+  padding: 32px 40px;
+  max-width: 380px;
+  text-align: center;
+}
+
+.instruction-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin: 20px 0;
+  text-align: left;
+}
+
+.step {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.step-icon {
+  font-size: 1.8rem;
+  flex-shrink: 0;
+}
+
+.step strong {
+  display: block;
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  margin-bottom: 2px;
+}
+
+.step p {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  margin: 0;
+}
+
+.dismiss-hint {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  margin-top: 8px;
 }
 
 @media (max-width: 768px) {
   .header {
-    padding: 8px 12px;
+    padding: 6px 12px;
   }
   .header-content {
     flex-direction: column;
-    gap: 8px;
+    gap: 6px;
   }
-  .game-area {
-    padding: 8px;
+  .status-bar {
+    gap: 6px;
+    flex-wrap: wrap;
+    justify-content: center;
   }
 }
 </style>

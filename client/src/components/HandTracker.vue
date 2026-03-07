@@ -9,6 +9,7 @@ const videoRef = ref(null)
 const canvasRef = ref(null)
 const isReady = ref(false)
 const gesture = ref('')
+const errorMsg = ref('')
 
 // State
 let gestureRecognizer = null
@@ -16,21 +17,39 @@ let animationFrameId = null
 let previousGesture = ''
 let stream = null
 
+// Smoothing buffer for steadier aim
+const SMOOTH_FACTOR = 5
+let posBuffer = []
+
+function getSmoothedPosition(x, y) {
+  posBuffer.push({ x, y })
+  if (posBuffer.length > SMOOTH_FACTOR) posBuffer.shift()
+
+  const avg = posBuffer.reduce(
+    (acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y }),
+    { x: 0, y: 0 }
+  )
+  return {
+    x: avg.x / posBuffer.length,
+    y: avg.y / posBuffer.length
+  }
+}
+
 // ─── Initialize MediaPipe GestureRecognizer ───
-async function initGestureRecognizer() {
+async function createRecognizer(delegate = 'GPU') {
   const vision = await FilesetResolver.forVisionTasks(
     'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm'
   )
 
-  gestureRecognizer = await GestureRecognizer.createFromOptions(vision, {
+  return await GestureRecognizer.createFromOptions(vision, {
     baseOptions: {
       modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task',
-      delegate: 'GPU'
+      delegate: delegate
     },
     runningMode: 'VIDEO',
     numHands: 1,
-    minHandDetectionConfidence: 0.5,
-    minHandPresenceConfidence: 0.5,
+    minHandDetectionConfidence: 0.6,
+    minHandPresenceConfidence: 0.6,
     minTrackingConfidence: 0.5
   })
 }
@@ -38,7 +57,12 @@ async function initGestureRecognizer() {
 // ─── Start Webcam ───
 async function startWebcam() {
   stream = await navigator.mediaDevices.getUserMedia({
-    video: { width: 640, height: 480, facingMode: 'user' }
+    video: {
+      width: { ideal: 640 },
+      height: { ideal: 480 },
+      facingMode: 'user',
+      frameRate: { ideal: 30 }
+    }
   })
   videoRef.value.srcObject = stream
   await new Promise(resolve => {
@@ -77,7 +101,6 @@ function processFrame() {
     // Draw hand landmarks on PiP
     const drawingUtils = new DrawingUtils(ctx)
     for (const landmarks of result.landmarks) {
-      // Mirror landmarks for drawing
       const mirrored = landmarks.map(l => ({ ...l, x: 1 - l.x }))
       drawingUtils.drawConnectors(mirrored, GestureRecognizer.HAND_CONNECTIONS, {
         color: '#39ff14',
@@ -90,13 +113,13 @@ function processFrame() {
       })
     }
 
-    // Extract index fingertip (landmark #8) for cursor position
+    // Use index fingertip (#8) for cursor, smoothed
     const indexTip = result.landmarks[0][8]
-    // Mirror X for selfie view
-    const x = 1 - indexTip.x
-    const y = indexTip.y
+    const rawX = 1 - indexTip.x
+    const rawY = indexTip.y
+    const smoothed = getSmoothedPosition(rawX, rawY)
 
-    emit('hand-move', { x, y })
+    emit('hand-move', smoothed)
 
     // Detect gesture
     if (result.gestures && result.gestures.length > 0) {
@@ -112,19 +135,27 @@ function processFrame() {
   } else {
     gesture.value = ''
     previousGesture = ''
+    posBuffer = []
     emit('hand-lost')
   }
 
   animationFrameId = requestAnimationFrame(processFrame)
 }
 
-// ─── Lifecycle ───
+// ─── Lifecycle (with Safari GPU fallback) ───
 onMounted(async () => {
   try {
-    await initGestureRecognizer()
+    gestureRecognizer = await createRecognizer('GPU')
     await startWebcam()
   } catch (err) {
-    console.error('[HandTracker] Init failed:', err)
+    console.warn('[HandTracker] GPU init failed, trying CPU fallback:', err.message)
+    try {
+      gestureRecognizer = await createRecognizer('CPU')
+      await startWebcam()
+    } catch (fallbackErr) {
+      console.error('[HandTracker] CPU fallback also failed:', fallbackErr)
+      errorMsg.value = 'Hand tracking failed to load. Try Chrome instead of Safari.'
+    }
   }
 })
 
@@ -154,10 +185,19 @@ onUnmounted(() => {
       </div>
 
       <!-- Loading state -->
-      <div v-if="!isReady" class="pip-loading">
+      <div v-if="!isReady && !errorMsg" class="pip-loading">
         <div class="loading-spinner"></div>
         <span>Starting camera...</span>
       </div>
+
+      <!-- Error state -->
+      <div v-if="errorMsg" class="pip-loading" style="color: #ff3b3b;">
+        <span>⚠️</span>
+        <span>{{ errorMsg }}</span>
+      </div>
+
+      <!-- Debug link -->
+      <a href="/debug" target="_blank" class="debug-link" title="Open hand tracking debug view">🖐️</a>
     </div>
   </div>
 </template>
@@ -258,6 +298,8 @@ onUnmounted(() => {
   background: rgba(0, 0, 0, 0.8);
   color: var(--text-secondary);
   font-size: 0.72rem;
+  text-align: center;
+  padding: 10px;
 }
 
 .loading-spinner {
@@ -267,5 +309,27 @@ onUnmounted(() => {
   border-top-color: var(--neon-green);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
+}
+
+.debug-link {
+  position: absolute;
+  bottom: 6px;
+  right: 6px;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  text-decoration: none;
+  font-size: 0.9rem;
+  transition: var(--transition);
+}
+
+.debug-link:hover {
+  background: rgba(0, 212, 255, 0.15);
+  border-color: rgba(0, 212, 255, 0.3);
 }
 </style>
