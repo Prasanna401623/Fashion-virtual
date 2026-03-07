@@ -56,20 +56,62 @@ async function createRecognizer(delegate = 'GPU') {
 
 // ─── Start Webcam ───
 async function startWebcam() {
-  stream = await navigator.mediaDevices.getUserMedia({
-    video: {
-      width: { ideal: 640 },
-      height: { ideal: 480 },
-      facingMode: 'user',
-      frameRate: { ideal: 30 }
+  console.log('[HandTracker] Requesting camera access...')
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        width: { ideal: 640 },
+        height: { ideal: 480 },
+        facingMode: 'user',
+        frameRate: { ideal: 30 }
+      }
+    })
+    console.log('[HandTracker] Camera stream obtained:', stream.getVideoTracks()[0].label)
+  } catch (camErr) {
+    console.error('[HandTracker] Camera access failed:', camErr.name, camErr.message)
+    errorMsg.value = `Camera error: ${camErr.message}`
+    return
+  }
+
+  const video = videoRef.value
+  if (!video) {
+    console.error('[HandTracker] Video element not found')
+    return
+  }
+
+  video.srcObject = stream
+
+  // Wait for video to be ready — multiple strategies
+  await new Promise((resolve) => {
+    if (video.readyState >= 2) {
+      console.log('[HandTracker] Video already has data')
+      resolve()
+      return
     }
+    const onLoaded = () => {
+      console.log('[HandTracker] Video loadeddata fired')
+      clearTimeout(timer)
+      resolve()
+    }
+    video.addEventListener('loadeddata', onLoaded, { once: true })
+    const timer = setTimeout(() => {
+      console.warn('[HandTracker] Video loadeddata timeout, proceeding (readyState:', video.readyState, ')')
+      video.removeEventListener('loadeddata', onLoaded)
+      resolve()
+    }, 3000)
   })
-  videoRef.value.srcObject = stream
-  await new Promise(resolve => {
-    videoRef.value.onloadeddata = resolve
-  })
+
+  // Explicitly play (critical for some browsers)
+  try {
+    await video.play()
+    console.log('[HandTracker] Video playing:', video.videoWidth, 'x', video.videoHeight)
+  } catch (playErr) {
+    console.warn('[HandTracker] Video autoplay failed:', playErr.message)
+  }
+
   isReady.value = true
   emit('ready')
+  console.log('[HandTracker] Starting frame processing')
   processFrame()
 }
 
@@ -211,7 +253,13 @@ onUnmounted(() => {
 }
 
 .hidden-video {
-  display: none;
+  position: absolute;
+  top: -9999px;
+  left: -9999px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .pip-container {

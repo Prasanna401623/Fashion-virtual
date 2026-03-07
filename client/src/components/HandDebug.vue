@@ -38,18 +38,64 @@ async function initGestureRecognizer() {
 }
 
 async function startWebcam() {
-  stream = await navigator.mediaDevices.getUserMedia({
-    video: {
-      width: { ideal: 1280 },
-      height: { ideal: 720 },
-      facingMode: 'user'
+  console.log('[HandDebug] Requesting camera access...')
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+        facingMode: 'user'
+      }
+    })
+    console.log('[HandDebug] Camera stream obtained:', stream.getVideoTracks()[0].label)
+  } catch (camErr) {
+    console.error('[HandDebug] Camera access failed:', camErr.name, camErr.message)
+    return
+  }
+
+  const video = videoRef.value
+  if (!video) {
+    console.error('[HandDebug] Video element not found')
+    return
+  }
+
+  video.srcObject = stream
+
+  // Wait for video to be ready — use multiple strategies
+  await new Promise((resolve) => {
+    // Strategy 1: Already has data
+    if (video.readyState >= 2) {
+      console.log('[HandDebug] Video already has data (readyState:', video.readyState, ')')
+      resolve()
+      return
     }
+
+    // Strategy 2: Listen for loadeddata event
+    const onLoaded = () => {
+      console.log('[HandDebug] Video loadeddata fired')
+      clearTimeout(fallbackTimer)
+      resolve()
+    }
+    video.addEventListener('loadeddata', onLoaded, { once: true })
+
+    // Strategy 3: Timeout fallback (3 seconds)
+    const fallbackTimer = setTimeout(() => {
+      console.warn('[HandDebug] Video loadeddata timeout, proceeding anyway (readyState:', video.readyState, ')')
+      video.removeEventListener('loadeddata', onLoaded)
+      resolve()
+    }, 3000)
   })
-  videoRef.value.srcObject = stream
-  await new Promise(resolve => {
-    videoRef.value.onloadeddata = resolve
-  })
+
+  // Explicitly play the video (critical for some browsers)
+  try {
+    await video.play()
+    console.log('[HandDebug] Video playing. Dimensions:', video.videoWidth, 'x', video.videoHeight)
+  } catch (playErr) {
+    console.warn('[HandDebug] Video autoplay failed:', playErr.message)
+  }
+
   isReady.value = true
+  console.log('[HandDebug] Starting frame processing loop')
   processFrame()
 }
 
@@ -401,7 +447,13 @@ onUnmounted(() => {
 }
 
 .hidden-video {
-  display: none;
+  position: absolute;
+  top: -9999px;
+  left: -9999px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .debug-canvas {
