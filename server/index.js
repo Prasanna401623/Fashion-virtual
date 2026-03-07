@@ -2,35 +2,53 @@ const express = require('express');
 const cors = require('cors');
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
-// Enable CORS so our React/Vue frontend on port 5173 can talk to this server
 app.use(cors());
-
-// Enable JSON parsing for incoming request bodies
 app.use(express.json());
 
-// Basic health check endpoint
+// ─── In-memory leaderboard ───
+let leaderboard = [];
+
+// Health check
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', message: 'Backend is running!' });
+  res.json({ status: 'ok', message: 'GunHand backend is running!' });
 });
 
-// The AI feedback endpoint (placeholder for now, Azure AI comes in Day 5)
-app.post('/api/style-feedback', (req, res) => {
-  const { shirtColor, scenario } = req.body;
+// Get leaderboard (top 10)
+app.get('/api/leaderboard', (req, res) => {
+  const top10 = leaderboard
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 10);
+  res.json({ leaderboard: top10 });
+});
 
-  console.log(`Received request for shirt: ${shirtColor}, scenario: ${scenario}`);
+// Submit score
+app.post('/api/leaderboard', (req, res) => {
+  const { name, score, hits, misses, accuracy, bestCombo } = req.body;
 
-  // Fake AI response for testing the connection
-  const fakeResponse = `(Day 4 Placeholder) A ${shirtColor} shirt is a fantastic choice for a ${scenario}. It creates a very clean and confident look!`;
+  if (!name || typeof score !== 'number') {
+    return res.status(400).json({ error: 'Name and score are required' });
+  }
 
-  // We simulate a 1-second delay so you can see the loading spinner in the UI
-  setTimeout(() => {
-    res.json({ feedback: fakeResponse });
-  }, 1000);
+  const entry = {
+    id: Date.now().toString(),
+    name: name.slice(0, 20), // Max 20 chars
+    score,
+    hits: hits || 0,
+    misses: misses || 0,
+    accuracy: accuracy || 0,
+    bestCombo: bestCombo || 0,
+    timestamp: new Date().toISOString()
+  };
+
+  leaderboard.push(entry);
+  console.log(`[Leaderboard] New entry: ${name} — ${score} pts`);
+
+  res.json({ entry, rank: leaderboard.filter(e => e.score >= score).length });
 });
 
 // Start the server
 app.listen(PORT, () => {
-  console.log(`✅ Server is running on http://localhost:${PORT}`);
+  console.log(`✅ GunHand server running on http://localhost:${PORT}`);
 });
