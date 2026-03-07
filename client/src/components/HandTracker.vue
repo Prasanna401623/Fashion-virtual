@@ -1,8 +1,21 @@
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, watch } from 'vue'
 import { GestureRecognizer, FilesetResolver, DrawingUtils } from '@mediapipe/tasks-vision'
 
 const emit = defineEmits(['hand-move', 'shoot', 'hand-lost', 'ready'])
+
+const props = defineProps({
+  settings: {
+    type: Object,
+    default: () => ({
+      sensitivity: 1.0,
+      smoothing: 5,
+      fireGesture: 'Closed_Fist',
+      positionLock: true,
+      lockDuration: 300
+    })
+  }
+})
 
 // Refs
 const videoRef = ref(null)
@@ -17,13 +30,18 @@ let animationFrameId = null
 let previousGesture = ''
 let stream = null
 
-// Smoothing buffer for steadier aim
-const SMOOTH_FACTOR = 5
+// Position lock state
+let positionLocked = false
+let lockTimer = null
+let lockedPosition = null
+
+// Smoothing buffer
 let posBuffer = []
 
 function getSmoothedPosition(x, y) {
+  const bufferSize = props.settings.smoothing || 5
   posBuffer.push({ x, y })
-  if (posBuffer.length > SMOOTH_FACTOR) posBuffer.shift()
+  if (posBuffer.length > bufferSize) posBuffer.shift()
 
   const avg = posBuffer.reduce(
     (acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y }),
@@ -81,27 +99,22 @@ async function startWebcam() {
 
   video.srcObject = stream
 
-  // Wait for video to be ready — multiple strategies
   await new Promise((resolve) => {
     if (video.readyState >= 2) {
-      console.log('[HandTracker] Video already has data')
       resolve()
       return
     }
     const onLoaded = () => {
-      console.log('[HandTracker] Video loadeddata fired')
       clearTimeout(timer)
       resolve()
     }
     video.addEventListener('loadeddata', onLoaded, { once: true })
     const timer = setTimeout(() => {
-      console.warn('[HandTracker] Video loadeddata timeout, proceeding (readyState:', video.readyState, ')')
       video.removeEventListener('loadeddata', onLoaded)
       resolve()
     }, 3000)
   })
 
-  // Explicitly play (critical for some browsers)
   try {
     await video.play()
     console.log('[HandTracker] Video playing:', video.videoWidth, 'x', video.videoHeight)
@@ -111,7 +124,6 @@ async function startWebcam() {
 
   isReady.value = true
   emit('ready')
-  console.log('[HandTracker] Starting frame processing')
   processFrame()
 }
 
@@ -129,10 +141,9 @@ function processFrame() {
   canvas.width = video.videoWidth
   canvas.height = video.videoHeight
 
-  // Run gesture recognition
   const result = gestureRecognizer.recognizeForVideo(video, performance.now())
 
-  // Draw PiP preview: mirrored webcam + hand landmarks
+  // Draw mirrored PiP preview
   ctx.save()
   ctx.translate(canvas.width, 0)
   ctx.scale(-1, 1)
@@ -140,7 +151,7 @@ function processFrame() {
   ctx.restore()
 
   if (result.landmarks && result.landmarks.length > 0) {
-    // Draw hand landmarks on PiP
+    // Draw landmarks
     const drawingUtils = new DrawingUtils(ctx)
     for (const landmarks of result.landmarks) {
       const mirrored = landmarks.map(l => ({ ...l, x: 1 - l.x }))
@@ -155,21 +166,51 @@ function processFrame() {
       })
     }
 
-    // Use index fingertip (#8) for cursor, smoothed
+    // Get cursor position from index fingertip (#8)
     const indexTip = result.landmarks[0][8]
-    const rawX = 1 - indexTip.x
-    const rawY = indexTip.y
-    const smoothed = getSmoothedPosition(rawX, rawY)
+    const sens = props.settings.sensitivity || 1.0
 
-    emit('hand-move', smoothed)
+    // Apply sensitivity: scale from center (0.5)
+    const rawX = 0.5 + ((1 - indexTip.x) - 0.5) * sens
+    const rawY = 0.5 + (indexTip.y - 0.5) * sens
 
-    // Detect gesture
+    // Clamp to 0-1 range
+    const clampedX = Math.max(0, Math.min(1, rawX))
+    const clampedY = Math.max(0, Math.min(1, rawY))
+
+    const smoothed = getSmoothedPosition(clampedX, clampedY)
+
+    // If position is locked (after firing), emit the locked position instead
+    if (positionLocked && lockedPosition) {
+      emit('hand-move', lockedPosition)
+    } else {
+      emit('hand-move', smoothed)
+      // Store last known good position (for position lock)
+      lockedPosition = { ...smoothed }
+    }
+
+    // Detect gesture and fire
     if (result.gestures && result.gestures.length > 0) {
       const currentGesture = result.gestures[0][0].categoryName
       gesture.value = currentGesture
 
-      // Fire on TRANSITION to Closed_Fist only
-      if (currentGesture === 'Closed_Fist' && previousGesture !== 'Closed_Fist') {
+      const fireGesture = props.settings.fireGesture || 'Closed_Fist'
+
+      // Fire on TRANSITION to fire gesture
+      if (currentGesture === fireGesture && previousGesture !== fireGesture) {
+        // Lock the position before firing
+        if (props.settings.positionLock && lockedPosition) {
+          positionLocked = true
+
+          // Clear any existing lock timer
+          if (lockTimer) clearTimeout(lockTimer)
+
+          // Unlock after duration
+          lockTimer = setTimeout(() => {
+            positionLocked = false
+          }, props.settings.lockDuration || 300)
+        }
+
         emit('shoot')
       }
       previousGesture = currentGesture
@@ -178,6 +219,7 @@ function processFrame() {
     gesture.value = ''
     previousGesture = ''
     posBuffer = []
+    positionLocked = false
     emit('hand-lost')
   }
 
@@ -196,13 +238,14 @@ onMounted(async () => {
       await startWebcam()
     } catch (fallbackErr) {
       console.error('[HandTracker] CPU fallback also failed:', fallbackErr)
-      errorMsg.value = 'Hand tracking failed to load. Try Chrome instead of Safari.'
+      errorMsg.value = 'Hand tracking failed to load. Try Chrome.'
     }
   }
 })
 
 onUnmounted(() => {
   if (animationFrameId) cancelAnimationFrame(animationFrameId)
+  if (lockTimer) clearTimeout(lockTimer)
   if (stream) stream.getTracks().forEach(t => t.stop())
   if (gestureRecognizer) gestureRecognizer.close()
 })
@@ -210,35 +253,29 @@ onUnmounted(() => {
 
 <template>
   <div class="hand-tracker">
-    <!-- Hidden video element for MediaPipe input -->
     <video ref="videoRef" autoplay playsinline muted class="hidden-video"></video>
 
-    <!-- PiP webcam preview with landmarks -->
     <div class="pip-container" :class="{ active: gesture }">
       <canvas ref="canvasRef" class="pip-canvas"></canvas>
 
-      <!-- Gesture badge -->
       <div class="gesture-badge" :class="{
-        aiming: gesture === 'Open_Palm',
-        shooting: gesture === 'Closed_Fist'
+        aiming: gesture && gesture !== (settings.fireGesture || 'Closed_Fist'),
+        shooting: gesture === (settings.fireGesture || 'Closed_Fist')
       }">
         <span class="gesture-dot"></span>
-        {{ gesture === 'Closed_Fist' ? '🔫 FIRE!' : gesture === 'Open_Palm' ? '🎯 Aiming' : '✋ Show Hand' }}
+        {{ gesture === (settings.fireGesture || 'Closed_Fist') ? '🔫 FIRE!' : gesture ? '🎯 Aiming' : '✋ Show Hand' }}
       </div>
 
-      <!-- Loading state -->
       <div v-if="!isReady && !errorMsg" class="pip-loading">
         <div class="loading-spinner"></div>
         <span>Starting camera...</span>
       </div>
 
-      <!-- Error state -->
       <div v-if="errorMsg" class="pip-loading" style="color: #ff3b3b;">
         <span>⚠️</span>
         <span>{{ errorMsg }}</span>
       </div>
 
-      <!-- Debug link -->
       <a href="/debug" target="_blank" class="debug-link" title="Open hand tracking debug view">🖐️</a>
     </div>
   </div>
