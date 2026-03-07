@@ -1,0 +1,6 @@
+{
+  "rewrites": [
+    { "source": "/duckhunt/(.*)", "destination": "https://fashion-virtual.onrender.com/duckhunt/$1" },
+    { "source": "/api/(.*)", "destination": "https://fashion-virtual.onrender.com/api/$1" }
+  ]
+}
