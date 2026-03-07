@@ -1,6 +1,7 @@
 <script setup>
-import { ref, onMounted, onUnmounted, watch } from 'vue'
+import { ref } from 'vue'
 import HandTracker from './components/HandTracker.vue'
+import GameSettings from './components/GameSettings.vue'
 
 // ─── State ───
 const iframeRef = ref(null)
@@ -10,12 +11,22 @@ const trackerReady = ref(false)
 const gameLoaded = ref(false)
 const showInstructions = ref(true)
 
+// ─── Settings ───
+const settings = ref({
+  sensitivity: 1.0,
+  smoothing: 5,
+  fireGesture: 'Closed_Fist',
+  positionLock: true,
+  lockDuration: 300
+})
+
+function onSettingsUpdate(newSettings) {
+  settings.value = newSettings
+}
+
 // Smoothed cursor position
 let smoothX = 0.5
 let smoothY = 0.5
-
-// Track previous gesture for transition detection
-let previousGesture = ''
 
 // Crosshair cursor element
 const cursorX = ref(50)
@@ -31,28 +42,33 @@ function dispatchClickToIframe(x, y) {
     const canvas = iframeDoc.querySelector('canvas')
     if (!canvas) return
 
-    // Convert normalized 0-1 coords to iframe pixel coords
+    // Convert normalized 0-1 coords to iframe pixel coords.
+    // canvas fills the iframe window so rect.left/top ≈ 0;
+    // clientX = x * rect.width places the click at the right screen position.
     const rect = canvas.getBoundingClientRect()
-    const pixelX = x * rect.width
-    const pixelY = y * rect.height
+    const clientX = rect.left + x * rect.width
+    const clientY = rect.top + y * rect.height
+    const iframeWin = iframe.contentWindow
 
-    // Dispatch mousedown + mouseup (PixiJS listens for mousedown)
-    const mouseDownEvent = new MouseEvent('mousedown', {
-      clientX: pixelX,
-      clientY: pixelY,
-      bubbles: true,
-      cancelable: true
-    })
+    const shared = { bubbles: true, cancelable: true, view: iframeWin, clientX, clientY }
 
-    const mouseUpEvent = new MouseEvent('mouseup', {
-      clientX: pixelX,
-      clientY: pixelY,
-      bubbles: true,
-      cancelable: true
-    })
+    // PIXI v4 in Chrome sets supportsPointerEvents=true and its onMouseDown()
+    // returns early — it ONLY processes pointerdown. Dispatching mousedown alone
+    // is silently ignored. We send both event types to cover all PIXI versions.
+    const pointerShared = { ...shared, pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1 }
 
-    canvas.dispatchEvent(mouseDownEvent)
-    setTimeout(() => canvas.dispatchEvent(mouseUpEvent), 50)
+    // Move first so PIXI's internal cursor position is up-to-date
+    canvas.dispatchEvent(new PointerEvent('pointermove', { ...pointerShared, buttons: 0 }))
+    canvas.dispatchEvent(new MouseEvent('mousemove', { ...shared, button: 0, buttons: 0 }))
+
+    // Fire
+    canvas.dispatchEvent(new PointerEvent('pointerdown', pointerShared))
+    canvas.dispatchEvent(new MouseEvent('mousedown', { ...shared, button: 0, buttons: 1 }))
+
+    setTimeout(() => {
+      canvas.dispatchEvent(new PointerEvent('pointerup', { ...pointerShared, buttons: 0 }))
+      canvas.dispatchEvent(new MouseEvent('mouseup', { ...shared, button: 0, buttons: 0 }))
+    }, 50)
   } catch (err) {
     console.error('[GunHand] Error dispatching click to iframe:', err)
   }
@@ -62,7 +78,7 @@ function dispatchClickToIframe(x, y) {
 function onHandMove(pos) {
   handPosition.value = pos
 
-  // Smooth the cursor (lerp)
+  // Smooth the cursor (lerp) for crosshair visual
   smoothX += (pos.x - smoothX) * 0.2
   smoothY += (pos.y - smoothY) * 0.2
 
@@ -70,11 +86,20 @@ function onHandMove(pos) {
   cursorY.value = smoothY * 100
 }
 
+function onGestureChange(g) {
+  gesture.value = g
+}
+
 function onShoot() {
   if (!gameLoaded.value) return
 
-  // Use smoothed position for the shot
-  dispatchClickToIframe(smoothX, smoothY)
+  // Use HandTracker's emitted position (already position-locked) for accuracy
+  const pos = handPosition.value
+  if (pos) {
+    dispatchClickToIframe(pos.x, pos.y)
+  } else {
+    dispatchClickToIframe(smoothX, smoothY)
+  }
 }
 
 function onHandLost() {
@@ -124,11 +149,11 @@ function dismissInstructions() {
             {{ gameLoaded ? 'Game Loaded' : 'Loading Game...' }}
           </div>
           <div class="status-chip gesture-chip" :class="{
-            aiming: handPosition && gesture !== 'Closed_Fist',
-            shooting: gesture === 'Closed_Fist'
+            aiming: handPosition && gesture !== settings.fireGesture,
+            shooting: gesture === settings.fireGesture
           }">
             <span class="status-dot"></span>
-            {{ gesture === 'Closed_Fist' ? '🔫 FIRE!' : handPosition ? '🎯 Aiming' : '✋ Show Hand' }}
+            {{ gesture === settings.fireGesture ? '🔫 FIRE!' : handPosition ? '🎯 Aiming' : '✋ Show Hand' }}
           </div>
         </div>
       </div>
@@ -197,12 +222,17 @@ function dismissInstructions() {
 
       <!-- Hand Tracker PiP -->
       <HandTracker
+        :settings="settings"
         @hand-move="onHandMove"
         @shoot="onShoot"
         @hand-lost="onHandLost"
         @ready="onTrackerReady"
+        @gesture-change="onGestureChange"
       />
     </main>
+
+    <!-- Settings Panel -->
+    <GameSettings :settings="settings" @update:settings="onSettingsUpdate" />
   </div>
 </template>
 

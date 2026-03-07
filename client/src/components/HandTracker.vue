@@ -2,7 +2,7 @@
 import { ref, onMounted, onUnmounted, watch } from 'vue'
 import { GestureRecognizer, FilesetResolver, DrawingUtils } from '@mediapipe/tasks-vision'
 
-const emit = defineEmits(['hand-move', 'shoot', 'hand-lost', 'ready'])
+const emit = defineEmits(['hand-move', 'shoot', 'hand-lost', 'ready', 'gesture-change'])
 
 const props = defineProps({
   settings: {
@@ -194,6 +194,11 @@ function processFrame() {
       const currentGesture = result.gestures[0][0].categoryName
       gesture.value = currentGesture
 
+      // Notify App.vue of gesture changes
+      if (currentGesture !== previousGesture) {
+        emit('gesture-change', currentGesture)
+      }
+
       const fireGesture = props.settings.fireGesture || 'Closed_Fist'
 
       // Fire on TRANSITION to fire gesture
@@ -217,6 +222,9 @@ function processFrame() {
     }
   } else {
     gesture.value = ''
+    if (previousGesture !== '') {
+      emit('gesture-change', '')
+    }
     previousGesture = ''
     posBuffer = []
     positionLocked = false
